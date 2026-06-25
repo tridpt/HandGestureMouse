@@ -1,0 +1,15 @@
+{
+  "camera_index": 0,
+  "camera_width": 640,
+  "camera_height": 480,
+  "control_frame_margin": 90,
+  "smoothening": 5.0,
+  "safe_screen_margin": 4,
+  "left_click_distance_ratio": 0.12,
+  "right_click_distance_ratio": 0.1,
+  "drag_distance_ratio": 0.09,
+  "drag_hold_seconds": 0.45,
+  "scroll_spread_ratio": 0.18,
+  "scroll_deadzone_px": 10,
+  "scroll_speed": 0.35
+}
