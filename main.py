@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import json
 import logging
-import math
 import time
-from dataclasses import asdict, dataclass, fields
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -13,9 +11,16 @@ import mediapipe as mp
 import numpy as np
 import pyautogui
 
+from app_config import AppConfig, SETTINGS_PATH, copy_config_values, load_config, save_config
+from gesture_logic import analyze_hand, is_fist_gesture, is_scroll_gesture, landmark_to_pixel
+
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - Windows-only convenience.
+    msvcrt = None
+
 
 MODEL_PATH = Path(__file__).with_name("hand_landmarker.task")
-SETTINGS_PATH = Path(__file__).with_name("settings.json")
 WINDOW_NAME = "Hand Gesture Mouse"
 
 BaseOptions = mp.tasks.BaseOptions
@@ -24,23 +29,6 @@ HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
 VisionRunningMode = mp.tasks.vision.RunningMode
 
 LOGGER = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class AppConfig:
-    camera_index: int = 0
-    camera_width: int = 640
-    camera_height: int = 480
-    control_frame_margin: int = 90
-    smoothening: float = 5.0
-    safe_screen_margin: int = 4
-    left_click_distance_ratio: float = 0.12
-    right_click_distance_ratio: float = 0.10
-    drag_distance_ratio: float = 0.09
-    drag_hold_seconds: float = 0.45
-    scroll_spread_ratio: float = 0.18
-    scroll_deadzone_px: int = 10
-    scroll_speed: float = 0.35
 
 
 @dataclass
@@ -52,41 +40,24 @@ class MouseState:
     drag_started_at: float | None = None
     is_dragging: bool = False
     scroll_anchor_y: float | None = None
+    control_enabled: bool = True
+    fist_started_at: float | None = None
+    pause_gesture_armed: bool = True
+    last_pause_toggle_at: float = 0.0
     status: str = "Move"
     status_until: float = 0.0
 
 
+@dataclass
+class UiState:
+    preview_hidden: bool = False
+    config_dirty: bool = False
+    notice: str = ""
+    notice_until: float = 0.0
+
+
 def configure_logging() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-
-
-def load_config(path: Path = SETTINGS_PATH) -> AppConfig:
-    defaults = AppConfig()
-    if not path.exists():
-        return defaults
-
-    try:
-        raw_config = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as error:
-        LOGGER.warning("Không đọc được settings.json, dùng cấu hình mặc định: %s", error)
-        return defaults
-
-    if not isinstance(raw_config, dict):
-        LOGGER.warning("settings.json phải là object JSON, dùng cấu hình mặc định.")
-        return defaults
-
-    allowed_keys = {field.name for field in fields(AppConfig)}
-    default_values = asdict(defaults)
-    custom_values = {key: value for key, value in raw_config.items() if key in allowed_keys}
-    unknown_keys = sorted(set(raw_config) - allowed_keys)
-    if unknown_keys:
-        LOGGER.warning("Bỏ qua cấu hình không hỗ trợ: %s", ", ".join(unknown_keys))
-
-    try:
-        return AppConfig(**{**default_values, **custom_values})
-    except TypeError as error:
-        LOGGER.warning("settings.json có giá trị không hợp lệ, dùng cấu hình mặc định: %s", error)
-        return defaults
 
 
 def build_landmarker_options(model_path: Path) -> HandLandmarkerOptions:
@@ -110,28 +81,6 @@ def open_camera(config: AppConfig) -> cv2.VideoCapture:
         raise RuntimeError("Không mở được camera. Hãy kiểm tra quyền camera hoặc camera index.")
 
     return cap
-
-
-def landmark_to_pixel(landmark: Any, width: int, height: int) -> tuple[int, int]:
-    return int(landmark.x * width), int(landmark.y * height)
-
-
-def hand_diagonal(hand_landmarks: list[Any], width: int, height: int) -> float:
-    xs = [lm.x * width for lm in hand_landmarks]
-    ys = [lm.y * height for lm in hand_landmarks]
-    return math.hypot(max(xs) - min(xs), max(ys) - min(ys))
-
-
-def distance_ratio(
-    point_a: tuple[int, int],
-    point_b: tuple[int, int],
-    diagonal: float,
-) -> float:
-    return math.hypot(point_b[0] - point_a[0], point_b[1] - point_a[1]) / max(diagonal, 1.0)
-
-
-def is_finger_up(hand_landmarks: list[Any], tip_id: int, pip_id: int) -> bool:
-    return hand_landmarks[tip_id].y < hand_landmarks[pip_id].y
 
 
 def map_camera_to_screen(
@@ -176,9 +125,28 @@ def set_status(state: MouseState, status: str, hold_seconds: float = 0.0) -> Non
 
 
 def current_status(state: MouseState) -> str:
-    if state.status_until and time.monotonic() > state.status_until:
-        return "Move"
+    now = time.monotonic()
+    if state.status_until and now > state.status_until:
+        state.status_until = 0.0
+        state.status = "Paused" if not state.control_enabled else "Move"
+
+    if not state.control_enabled and not state.status_until:
+        return "Paused"
+
     return state.status
+
+
+def set_notice(ui_state: UiState, message: str, hold_seconds: float = 1.5) -> None:
+    ui_state.notice = message
+    ui_state.notice_until = time.monotonic() + hold_seconds
+    LOGGER.info(message)
+
+
+def current_notice(ui_state: UiState) -> str:
+    if ui_state.notice_until and time.monotonic() > ui_state.notice_until:
+        ui_state.notice = ""
+        ui_state.notice_until = 0.0
+    return ui_state.notice
 
 
 def move_mouse(x: float, y: float) -> bool:
@@ -257,6 +225,31 @@ def reset_gestures(state: MouseState) -> None:
     state.scroll_anchor_y = None
 
 
+def reset_pause_gesture(state: MouseState) -> None:
+    state.fist_started_at = None
+    state.pause_gesture_armed = True
+
+
+def handle_pause_gesture(state: MouseState, config: AppConfig) -> bool:
+    now = time.monotonic()
+    if state.fist_started_at is None:
+        state.fist_started_at = now
+
+    held_long_enough = now - state.fist_started_at >= config.pause_fist_hold_seconds
+    cooled_down = now - state.last_pause_toggle_at >= config.pause_toggle_cooldown_seconds
+
+    if state.pause_gesture_armed and held_long_enough and cooled_down:
+        state.control_enabled = not state.control_enabled
+        state.last_pause_toggle_at = now
+        state.pause_gesture_armed = False
+        status = "Paused" if not state.control_enabled else "Control on"
+        set_status(state, status, hold_seconds=0.9)
+        return True
+
+    set_status(state, "Hold fist" if state.control_enabled else "Hold fist to resume")
+    return True
+
+
 def draw_landmarks(image: Any, hand_landmarks: list[Any]) -> None:
     height, width, _ = image.shape
     for lm in hand_landmarks:
@@ -275,17 +268,102 @@ def draw_control_frame(image: Any, config: AppConfig) -> None:
     )
 
 
-def draw_status(image: Any, state: MouseState) -> None:
-    status = current_status(state)
-    cv2.rectangle(image, (14, 68), (260, 112), (20, 20, 20), cv2.FILLED)
+def draw_status(image: Any, state: MouseState, config: AppConfig, ui_state: UiState) -> None:
+    dirty_marker = "*" if ui_state.config_dirty else ""
+    cv2.rectangle(image, (14, 68), (376, 136), (20, 20, 20), cv2.FILLED)
     cv2.putText(
         image,
-        f"Mode: {status}",
-        (24, 98),
+        f"Mode: {current_status(state)}",
+        (24, 96),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.8,
+        0.74,
         (255, 255, 255),
         2,
+    )
+    cv2.putText(
+        image,
+        (
+            f"Smooth {config.smoothening:.1f}  "
+            f"Click {config.left_click_distance_ratio:.2f}  "
+            f"Frame {config.control_frame_margin}{dirty_marker}"
+        ),
+        (24, 122),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        (210, 230, 255),
+        1,
+    )
+
+
+def draw_notice(image: Any, ui_state: UiState) -> None:
+    notice = current_notice(ui_state)
+    if not notice:
+        return
+
+    height, width, _ = image.shape
+    cv2.rectangle(image, (14, height - 48), (width - 14, height - 14), (30, 30, 30), cv2.FILLED)
+    cv2.putText(
+        image,
+        notice[:74],
+        (24, height - 24),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (255, 255, 255),
+        1,
+    )
+
+
+def draw_help_panel(image: Any, state: MouseState) -> None:
+    height, width, _ = image.shape
+    panel_width = 238
+    x0 = max(10, width - panel_width - 10)
+    y0 = 14
+    x1 = width - 10
+    y1 = min(height - 58, y0 + 340)
+    cv2.rectangle(image, (x0, y0), (x1, y1), (18, 18, 18), cv2.FILLED)
+    cv2.rectangle(image, (x0, y0), (x1, y1), (80, 80, 80), 1)
+
+    lines = [
+        ("Gestures", (0, 255, 255)),
+        ("Move: index finger", (245, 245, 245)),
+        ("Left: index + middle", (245, 245, 245)),
+        ("Right: middle + ring", (245, 245, 245)),
+        ("Drag: thumb + index", (245, 245, 245)),
+        ("Scroll: V sign up/down", (245, 245, 245)),
+        ("Pause: hold fist", (245, 245, 245)),
+        ("", (245, 245, 245)),
+        ("Hotkeys", (0, 255, 255)),
+        ("+/- smooth", (215, 230, 255)),
+        ("[ ] click threshold", (215, 230, 255)),
+        (", . control frame", (215, 230, 255)),
+        ("S save   M background", (215, 230, 255)),
+        ("P pause  Q quit", (215, 230, 255)),
+    ]
+
+    y = y0 + 28
+    for text, color in lines:
+        if text:
+            cv2.putText(
+                image,
+                text,
+                (x0 + 12, y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.48,
+                color,
+                1,
+            )
+        y += 23
+
+    status = "ON" if state.control_enabled else "PAUSED"
+    color = (80, 220, 120) if state.control_enabled else (0, 165, 255)
+    cv2.putText(
+        image,
+        f"Control: {status}",
+        (x0 + 12, y1 - 16),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        color,
+        1,
     )
 
 
@@ -336,7 +414,6 @@ def handle_drag(
     state: MouseState,
     config: AppConfig,
     thumb_index_ratio: float,
-    now: float,
 ) -> bool:
     if thumb_index_ratio >= config.drag_distance_ratio:
         return release_drag(state)
@@ -345,6 +422,7 @@ def handle_drag(
     state.right_click_active = False
     state.scroll_anchor_y = None
 
+    now = time.monotonic()
     if state.drag_started_at is None:
         state.drag_started_at = now
         set_status(state, "Hold drag")
@@ -390,20 +468,6 @@ def handle_clicks(
     return True
 
 
-def is_scroll_gesture(
-    hand_landmarks: list[Any],
-    index_middle_ratio: float,
-    config: AppConfig,
-) -> bool:
-    index_up = is_finger_up(hand_landmarks, 8, 6)
-    middle_up = is_finger_up(hand_landmarks, 12, 10)
-    ring_down = not is_finger_up(hand_landmarks, 16, 14)
-    pinky_down = not is_finger_up(hand_landmarks, 20, 18)
-    return index_up and middle_up and ring_down and pinky_down and (
-        index_middle_ratio > config.scroll_spread_ratio
-    )
-
-
 def handle_hand(
     image: Any,
     hand_landmarks: list[Any],
@@ -413,25 +477,33 @@ def handle_hand(
 ) -> bool:
     if len(hand_landmarks) <= 20:
         reset_gestures(state)
+        reset_pause_gesture(state)
         return release_drag(state)
 
     height, width, _ = image.shape
     screen_width, screen_height = screen_size
+    metrics = analyze_hand(hand_landmarks, width, height)
 
     draw_landmarks(image, hand_landmarks)
+    cv2.circle(image, metrics.index_tip, 15, (255, 0, 255), cv2.FILLED)
+    cv2.circle(image, metrics.middle_tip, 12, (255, 0, 255), cv2.FILLED)
+    cv2.circle(image, metrics.ring_tip, 10, (255, 0, 255), cv2.FILLED)
 
-    thumb_tip = landmark_to_pixel(hand_landmarks[4], width, height)
-    index_tip = landmark_to_pixel(hand_landmarks[8], width, height)
-    middle_tip = landmark_to_pixel(hand_landmarks[12], width, height)
-    ring_tip = landmark_to_pixel(hand_landmarks[16], width, height)
+    if is_fist_gesture(metrics):
+        reset_gestures(state)
+        if not release_drag(state):
+            return False
+        return handle_pause_gesture(state, config)
 
-    cv2.circle(image, index_tip, 15, (255, 0, 255), cv2.FILLED)
-    cv2.circle(image, middle_tip, 12, (255, 0, 255), cv2.FILLED)
-    cv2.circle(image, ring_tip, 10, (255, 0, 255), cv2.FILLED)
+    reset_pause_gesture(state)
+    if not state.control_enabled:
+        reset_gestures(state)
+        set_status(state, "Paused")
+        return release_drag(state)
 
     target_x, target_y = map_camera_to_screen(
-        index_tip[0],
-        index_tip[1],
+        metrics.index_tip[0],
+        metrics.index_tip[1],
         width,
         height,
         screen_width,
@@ -448,28 +520,201 @@ def handle_hand(
     state.previous_x = current_x
     state.previous_y = current_y
 
-    diagonal = hand_diagonal(hand_landmarks, width, height)
-    thumb_index_ratio = distance_ratio(thumb_tip, index_tip, diagonal)
-    index_middle_ratio = distance_ratio(index_tip, middle_tip, diagonal)
-    middle_ring_ratio = distance_ratio(middle_tip, ring_tip, diagonal)
+    if metrics.thumb_index_ratio < config.drag_distance_ratio or state.drag_started_at is not None:
+        cv2.line(image, metrics.thumb_tip, metrics.index_tip, (0, 165, 255), 3)
+        return handle_drag(state, config, metrics.thumb_index_ratio)
 
-    now = time.monotonic()
-    if thumb_index_ratio < config.drag_distance_ratio or state.drag_started_at is not None:
-        cv2.line(image, thumb_tip, index_tip, (0, 165, 255), 3)
-        return handle_drag(state, config, thumb_index_ratio, now)
-
-    if not handle_clicks(state, index_middle_ratio, middle_ring_ratio, config):
+    if not handle_clicks(
+        state,
+        metrics.index_middle_ratio,
+        metrics.middle_ring_ratio,
+        config,
+    ):
         return False
 
     if state.left_click_active or state.right_click_active:
         return True
 
-    if is_scroll_gesture(hand_landmarks, index_middle_ratio, config):
-        return handle_scroll(image, state, config, index_tip, middle_tip)
+    if is_scroll_gesture(metrics, config):
+        return handle_scroll(image, state, config, metrics.index_tip, metrics.middle_tip)
 
     state.scroll_anchor_y = None
     if not state.status_until:
         set_status(state, "Move")
+    return True
+
+
+def normalize_key(raw_key: int) -> str | None:
+    if raw_key in (-1, 255):
+        return None
+    if raw_key == 27:
+        return "escape"
+    try:
+        return chr(raw_key).lower()
+    except ValueError:
+        return None
+
+
+def read_cv2_key() -> str | None:
+    return normalize_key(cv2.waitKey(1) & 0xFF)
+
+
+def read_terminal_key() -> str | None:
+    if msvcrt is None or not msvcrt.kbhit():
+        return None
+
+    key = msvcrt.getwch()
+    if key in ("\x00", "\xe0"):
+        if msvcrt.kbhit():
+            msvcrt.getwch()
+        return None
+    if key == "\x1b":
+        return "escape"
+    return key.lower()
+
+
+def safe_destroy_window() -> None:
+    try:
+        cv2.destroyWindow(WINDOW_NAME)
+    except cv2.error:
+        pass
+
+
+def adjust_float(
+    config: AppConfig,
+    field_name: str,
+    delta: float,
+    minimum: float,
+    maximum: float,
+    digits: int,
+    ui_state: UiState,
+    label: str,
+) -> None:
+    current_value = float(getattr(config, field_name))
+    new_value = round(min(max(current_value + delta, minimum), maximum), digits)
+    setattr(config, field_name, new_value)
+    ui_state.config_dirty = True
+    set_notice(ui_state, f"{label}: {new_value} (press S to save)")
+
+
+def adjust_int(
+    config: AppConfig,
+    field_name: str,
+    delta: int,
+    minimum: int,
+    maximum: int,
+    ui_state: UiState,
+    label: str,
+) -> None:
+    current_value = int(getattr(config, field_name))
+    new_value = min(max(current_value + delta, minimum), maximum)
+    setattr(config, field_name, new_value)
+    ui_state.config_dirty = True
+    set_notice(ui_state, f"{label}: {new_value} (press S to save)")
+
+
+def toggle_manual_pause(state: MouseState) -> None:
+    state.control_enabled = not state.control_enabled
+    reset_gestures(state)
+    status = "Paused" if not state.control_enabled else "Control on"
+    set_status(state, status, hold_seconds=0.8)
+
+
+def handle_hotkey(
+    key: str | None,
+    config: AppConfig,
+    mouse_state: MouseState,
+    ui_state: UiState,
+) -> bool:
+    if key is None:
+        return True
+
+    if key in ("q", "escape"):
+        return False
+
+    if key == "m":
+        ui_state.preview_hidden = not ui_state.preview_hidden
+        if ui_state.preview_hidden:
+            safe_destroy_window()
+            set_notice(ui_state, "Background mode: press M in terminal to show preview")
+        else:
+            set_notice(ui_state, "Preview shown")
+        return True
+
+    if key == "p":
+        toggle_manual_pause(mouse_state)
+        set_notice(ui_state, "Manual pause toggled")
+        return True
+
+    if key == "s":
+        save_config(config)
+        ui_state.config_dirty = False
+        set_notice(ui_state, f"Saved {SETTINGS_PATH.name}")
+        return True
+
+    if key == "r":
+        copy_config_values(config, load_config())
+        ui_state.config_dirty = False
+        set_notice(ui_state, f"Reloaded {SETTINGS_PATH.name}")
+        return True
+
+    if key in ("+", "="):
+        adjust_float(config, "smoothening", 0.5, 1.0, 15.0, 1, ui_state, "Smoothening")
+        return True
+
+    if key in ("-", "_"):
+        adjust_float(config, "smoothening", -0.5, 1.0, 15.0, 1, ui_state, "Smoothening")
+        return True
+
+    if key == "[":
+        adjust_float(
+            config,
+            "left_click_distance_ratio",
+            -0.01,
+            0.05,
+            0.25,
+            2,
+            ui_state,
+            "Left click threshold",
+        )
+        return True
+
+    if key == "]":
+        adjust_float(
+            config,
+            "left_click_distance_ratio",
+            0.01,
+            0.05,
+            0.25,
+            2,
+            ui_state,
+            "Left click threshold",
+        )
+        return True
+
+    if key == ",":
+        adjust_int(config, "control_frame_margin", -5, 20, 180, ui_state, "Control frame")
+        return True
+
+    if key == ".":
+        adjust_int(config, "control_frame_margin", 5, 20, 180, ui_state, "Control frame")
+        return True
+
+    if key == "9":
+        adjust_float(config, "scroll_speed", -0.05, 0.05, 1.5, 2, ui_state, "Scroll speed")
+        return True
+
+    if key == "0":
+        adjust_float(config, "scroll_speed", 0.05, 0.05, 1.5, 2, ui_state, "Scroll speed")
+        return True
+
+    return True
+
+
+def process_keys(config: AppConfig, mouse_state: MouseState, ui_state: UiState) -> bool:
+    terminal_key = read_terminal_key()
+    if not handle_hotkey(terminal_key, config, mouse_state, ui_state):
+        return False
     return True
 
 
@@ -482,7 +727,8 @@ def run() -> int:
     config = load_config()
     options = build_landmarker_options(MODEL_PATH)
     screen_size = tuple(pyautogui.size())
-    state = MouseState()
+    mouse_state = MouseState()
+    ui_state = UiState()
     previous_time = time.time()
     cap = open_camera(config)
 
@@ -491,7 +737,7 @@ def run() -> int:
 
     try:
         with HandLandmarker.create_from_options(options) as landmarker:
-            LOGGER.info("Camera đã lên. Bấm 'q' hoặc Esc ở cửa sổ video để tắt.")
+            LOGGER.info("Camera đã lên. Bấm 'q' hoặc Esc để tắt.")
 
             while True:
                 success, image = cap.read()
@@ -508,23 +754,35 @@ def run() -> int:
 
                 if hand_result.hand_landmarks:
                     for hand_landmarks in hand_result.hand_landmarks:
-                        if not handle_hand(image, hand_landmarks, state, screen_size, config):
+                        if not handle_hand(image, hand_landmarks, mouse_state, screen_size, config):
                             return 0
                 else:
-                    reset_gestures(state)
-                    if not release_drag(state):
+                    reset_gestures(mouse_state)
+                    reset_pause_gesture(mouse_state)
+                    if not release_drag(mouse_state):
                         return 0
+                    if not mouse_state.control_enabled:
+                        set_status(mouse_state, "Paused")
 
-                previous_time = draw_fps(image, previous_time)
-                draw_status(image, state)
-                cv2.imshow(WINDOW_NAME, image)
+                if not ui_state.preview_hidden:
+                    previous_time = draw_fps(image, previous_time)
+                    draw_status(image, mouse_state, config, ui_state)
+                    draw_help_panel(image, mouse_state)
+                    draw_notice(image, ui_state)
+                    cv2.imshow(WINDOW_NAME, image)
+                    cv2_key = read_cv2_key()
+                    if not handle_hotkey(cv2_key, config, mouse_state, ui_state):
+                        break
+                else:
+                    if not process_keys(config, mouse_state, ui_state):
+                        break
+                    time.sleep(0.001)
 
-                key = cv2.waitKey(1) & 0xFF
-                if key in (ord("q"), 27):
+                if not ui_state.preview_hidden and not process_keys(config, mouse_state, ui_state):
                     break
 
     finally:
-        release_drag(state)
+        release_drag(mouse_state)
         cap.release()
         cv2.destroyAllWindows()
 

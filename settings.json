@@ -11,5 +11,7 @@
   "drag_hold_seconds": 0.45,
   "scroll_spread_ratio": 0.18,
   "scroll_deadzone_px": 10,
-  "scroll_speed": 0.35
+  "scroll_speed": 0.35,
+  "pause_fist_hold_seconds": 0.55,
+  "pause_toggle_cooldown_seconds": 1.0
 }

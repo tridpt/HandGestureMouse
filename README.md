@@ -18,7 +18,20 @@ python main.py
 - Chạm đầu ngón giữa và ngón áp út để click chuột phải.
 - Chạm đầu ngón cái và ngón trỏ, giữ khoảng nửa giây để kéo thả.
 - Giơ ngón trỏ + ngón giữa kiểu dấu V, gập các ngón còn lại, rồi đưa tay lên/xuống để scroll.
+- Nắm tay và giữ một chút để bật/tắt điều khiển chuột.
 - Bấm `q` hoặc `Esc` trong cửa sổ video để thoát.
+
+## Phím tắt
+
+- `+` / `-`: tăng/giảm độ mượt `smoothening`.
+- `[` / `]`: giảm/tăng ngưỡng click trái.
+- `,` / `.`: thu hẹp/mở rộng vùng điều khiển.
+- `9` / `0`: giảm/tăng tốc độ scroll.
+- `p`: bật/tắt điều khiển chuột thủ công.
+- `m`: ẩn/hiện cửa sổ preview để chạy nền. Khi đã ẩn, bấm `m` trong terminal để hiện lại.
+- `s`: lưu cấu hình hiện tại vào `settings.json`.
+- `r`: đọc lại cấu hình từ `settings.json`.
+- `q` hoặc `Esc`: thoát.
 
 ## Tinh chỉnh
 
@@ -31,6 +44,13 @@ Các thông số nằm trong `settings.json`, có thể sửa rồi chạy lại
 - Click nhầm nhiều: giảm `left_click_distance_ratio`.
 - Kéo thả khó kích hoạt: tăng `drag_distance_ratio` hoặc giảm `drag_hold_seconds`.
 - Scroll quá nhanh/chậm: chỉnh `scroll_speed`.
+- Pause bằng nắm tay quá nhạy/chậm: chỉnh `pause_fist_hold_seconds`.
+
+## Kiểm tra logic
+
+```powershell
+python -m unittest
+```
 
 ## Lưu ý an toàn
 
