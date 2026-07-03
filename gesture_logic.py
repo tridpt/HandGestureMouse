@@ -41,8 +41,23 @@ def distance_ratio(
     return math.hypot(point_b[0] - point_a[0], point_b[1] - point_a[1]) / max(diagonal, 1.0)
 
 
+WRIST_ID = 0
+
+
+def _distance(point_a: Any, point_b: Any) -> float:
+    return math.hypot(point_a.x - point_b.x, point_a.y - point_b.y)
+
+
 def is_finger_up(hand_landmarks: list[Any], tip_id: int, pip_id: int) -> bool:
-    return hand_landmarks[tip_id].y < hand_landmarks[pip_id].y
+    """Ngón được coi là duỗi khi đầu ngón xa cổ tay hơn khớp PIP.
+
+    So sánh khoảng cách tới cổ tay (landmark 0) thay vì chỉ so tọa độ y, nên
+    kết quả không phụ thuộc vào việc tay đang thẳng đứng, nghiêng hay xoay.
+    """
+    wrist = hand_landmarks[WRIST_ID]
+    tip_distance = _distance(hand_landmarks[tip_id], wrist)
+    pip_distance = _distance(hand_landmarks[pip_id], wrist)
+    return tip_distance > pip_distance
 
 
 def analyze_hand(hand_landmarks: list[Any], width: int, height: int) -> GestureMetrics:

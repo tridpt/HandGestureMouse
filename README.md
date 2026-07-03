@@ -42,6 +42,8 @@ Các thông số nằm trong `settings.json`, có thể sửa rồi chạy lại
 - Vùng điều khiển quá hẹp/rộng: chỉnh `control_frame_margin`.
 - Click trái khó ăn: tăng `left_click_distance_ratio`.
 - Click nhầm nhiều: giảm `left_click_distance_ratio`.
+- Click bị lặp/nhấp nháy khi tay rung: tăng `left_click_release_ratio` / `right_click_release_ratio` (nới khoảng cách nhả) hoặc tăng `click_cooldown_seconds`.
+- Click hai lần khi chỉ muốn một: tăng `click_cooldown_seconds`.
 - Kéo thả khó kích hoạt: tăng `drag_distance_ratio` hoặc giảm `drag_hold_seconds`.
 - Scroll quá nhanh/chậm: chỉnh `scroll_speed`.
 - Pause bằng nắm tay quá nhạy/chậm: chỉnh `pause_fist_hold_seconds`.

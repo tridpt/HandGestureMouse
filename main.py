@@ -37,6 +37,7 @@ class MouseState:
     previous_y: float = 0.0
     left_click_active: bool = False
     right_click_active: bool = False
+    last_click_at: float = 0.0
     drag_started_at: float | None = None
     is_dragging: bool = False
     scroll_anchor_y: float | None = None
@@ -67,7 +68,7 @@ def build_landmarker_options(model_path: Path) -> HandLandmarkerOptions:
     return HandLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=str(model_path)),
         num_hands=1,
-        running_mode=VisionRunningMode.IMAGE,
+        running_mode=VisionRunningMode.VIDEO,
     )
 
 
@@ -149,64 +150,43 @@ def current_notice(ui_state: UiState) -> str:
     return ui_state.notice
 
 
-def move_mouse(x: float, y: float) -> bool:
+def safe_mouse_action(action: Any, failure_message: str) -> bool:
+    """Thực thi một thao tác chuột.
+
+    Trả về False (dừng app) chỉ khi người dùng chủ động kích hoạt fail-safe.
+    Lỗi thoáng qua được log lại và bỏ qua frame đó, app vẫn chạy tiếp.
+    """
     try:
-        pyautogui.moveTo(int(x), int(y), duration=0)
+        action()
     except pyautogui.FailSafeException:
         LOGGER.warning("Đã kích hoạt PyAutoGUI fail-safe. Dừng chương trình.")
         return False
     except Exception as error:
-        LOGGER.warning("Không thể di chuyển chuột. Dừng chương trình: %s", error)
-        return False
+        LOGGER.warning("%s (bỏ qua frame này): %s", failure_message, error)
     return True
+
+
+def move_mouse(x: float, y: float) -> bool:
+    return safe_mouse_action(
+        lambda: pyautogui.moveTo(int(x), int(y), duration=0),
+        "Không thể di chuyển chuột",
+    )
 
 
 def click_mouse(button: str = "left") -> bool:
-    try:
-        pyautogui.click(button=button)
-    except pyautogui.FailSafeException:
-        LOGGER.warning("Đã kích hoạt PyAutoGUI fail-safe. Dừng chương trình.")
-        return False
-    except Exception as error:
-        LOGGER.warning("Không thể click chuột. Dừng chương trình: %s", error)
-        return False
-    return True
+    return safe_mouse_action(lambda: pyautogui.click(button=button), "Không thể click chuột")
 
 
 def mouse_down() -> bool:
-    try:
-        pyautogui.mouseDown()
-    except pyautogui.FailSafeException:
-        LOGGER.warning("Đã kích hoạt PyAutoGUI fail-safe. Dừng chương trình.")
-        return False
-    except Exception as error:
-        LOGGER.warning("Không thể giữ chuột. Dừng chương trình: %s", error)
-        return False
-    return True
+    return safe_mouse_action(pyautogui.mouseDown, "Không thể giữ chuột")
 
 
 def mouse_up() -> bool:
-    try:
-        pyautogui.mouseUp()
-    except pyautogui.FailSafeException:
-        LOGGER.warning("Đã kích hoạt PyAutoGUI fail-safe. Dừng chương trình.")
-        return False
-    except Exception as error:
-        LOGGER.warning("Không thể thả chuột. Dừng chương trình: %s", error)
-        return False
-    return True
+    return safe_mouse_action(pyautogui.mouseUp, "Không thể thả chuột")
 
 
 def scroll_mouse(clicks: int) -> bool:
-    try:
-        pyautogui.scroll(clicks)
-    except pyautogui.FailSafeException:
-        LOGGER.warning("Đã kích hoạt PyAutoGUI fail-safe. Dừng chương trình.")
-        return False
-    except Exception as error:
-        LOGGER.warning("Không thể scroll. Dừng chương trình: %s", error)
-        return False
-    return True
+    return safe_mouse_action(lambda: pyautogui.scroll(clicks), "Không thể scroll")
 
 
 def release_drag(state: MouseState) -> bool:
@@ -443,28 +423,45 @@ def handle_clicks(
     middle_ring_ratio: float,
     config: AppConfig,
 ) -> bool:
-    if index_middle_ratio < config.left_click_distance_ratio:
+    now = time.monotonic()
+
+    # Left click: hysteresis (press vs release thresholds) + cooldown.
+    if state.left_click_active:
+        # Stay "pressed" until fingers spread past the release threshold.
+        if index_middle_ratio > config.left_click_release_ratio:
+            state.left_click_active = False
+        else:
+            state.right_click_active = False
+            state.scroll_anchor_y = None
+            return True
+    elif index_middle_ratio < config.left_click_distance_ratio:
         state.right_click_active = False
         state.scroll_anchor_y = None
-        if not state.left_click_active:
+        if now - state.last_click_at >= config.click_cooldown_seconds:
             if not click_mouse("left"):
                 return False
-            state.left_click_active = True
+            state.last_click_at = now
             set_status(state, "Left click", hold_seconds=0.4)
+        state.left_click_active = True
         return True
 
-    state.left_click_active = False
-
-    if middle_ring_ratio < config.right_click_distance_ratio:
+    # Right click: same hysteresis + cooldown scheme.
+    if state.right_click_active:
+        if middle_ring_ratio > config.right_click_release_ratio:
+            state.right_click_active = False
+        else:
+            state.scroll_anchor_y = None
+            return True
+    elif middle_ring_ratio < config.right_click_distance_ratio:
         state.scroll_anchor_y = None
-        if not state.right_click_active:
+        if now - state.last_click_at >= config.click_cooldown_seconds:
             if not click_mouse("right"):
                 return False
-            state.right_click_active = True
+            state.last_click_at = now
             set_status(state, "Right click", hold_seconds=0.4)
+        state.right_click_active = True
         return True
 
-    state.right_click_active = False
     return True
 
 
@@ -730,6 +727,8 @@ def run() -> int:
     mouse_state = MouseState()
     ui_state = UiState()
     previous_time = time.time()
+    start_time = time.monotonic()
+    last_timestamp_ms = -1
     cap = open_camera(config)
 
     LOGGER.info("Đang tải AI model nhận diện tay và mở camera...")
@@ -750,7 +749,11 @@ def run() -> int:
 
                 image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_rgb)
-                hand_result = landmarker.detect(mp_image)
+                timestamp_ms = int((time.monotonic() - start_time) * 1000)
+                if timestamp_ms <= last_timestamp_ms:
+                    timestamp_ms = last_timestamp_ms + 1
+                last_timestamp_ms = timestamp_ms
+                hand_result = landmarker.detect_for_video(mp_image, timestamp_ms)
 
                 if hand_result.hand_landmarks:
                     for hand_landmarks in hand_result.hand_landmarks:

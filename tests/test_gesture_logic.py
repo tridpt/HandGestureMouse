@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import unittest
 from dataclasses import dataclass
 
@@ -11,6 +12,21 @@ from gesture_logic import analyze_hand, distance_ratio, is_fist_gesture, is_scro
 class Landmark:
     x: float
     y: float
+
+
+def rotate_hand(hand: list[Landmark], degrees: float, pivot: Landmark) -> list[Landmark]:
+    theta = math.radians(degrees)
+    cos_t, sin_t = math.cos(theta), math.sin(theta)
+    rotated = []
+    for point in hand:
+        dx, dy = point.x - pivot.x, point.y - pivot.y
+        rotated.append(
+            Landmark(
+                pivot.x + dx * cos_t - dy * sin_t,
+                pivot.y + dx * sin_t + dy * cos_t,
+            )
+        )
+    return rotated
 
 
 def make_hand(*, index_up: bool, middle_up: bool, ring_up: bool, pinky_up: bool) -> list[Landmark]:
@@ -52,6 +68,29 @@ class GestureLogicTest(unittest.TestCase):
         hand = make_hand(index_up=True, middle_up=True, ring_up=True, pinky_up=True)
         metrics = analyze_hand(hand, 640, 480)
         self.assertFalse(is_scroll_gesture(metrics, AppConfig()))
+
+    def test_scroll_gesture_survives_hand_rotation(self) -> None:
+        wrist = Landmark(0.5, 0.8)
+        base = make_hand(index_up=True, middle_up=True, ring_up=False, pinky_up=False)
+        config = AppConfig(scroll_spread_ratio=0.12)
+        for degrees in (-60, -30, 30, 60, 90):
+            rotated = rotate_hand(base, degrees, wrist)
+            metrics = analyze_hand(rotated, 640, 480)
+            self.assertTrue(
+                is_scroll_gesture(metrics, config),
+                f"Cử chỉ scroll phải nhận diện được khi tay xoay {degrees} độ",
+            )
+
+    def test_fist_survives_hand_rotation(self) -> None:
+        wrist = Landmark(0.5, 0.8)
+        base = make_hand(index_up=False, middle_up=False, ring_up=False, pinky_up=False)
+        for degrees in (-60, -30, 30, 60, 90):
+            rotated = rotate_hand(base, degrees, wrist)
+            metrics = analyze_hand(rotated, 640, 480)
+            self.assertTrue(
+                is_fist_gesture(metrics),
+                f"Nắm tay phải nhận diện được khi tay xoay {degrees} độ",
+            )
 
 
 if __name__ == "__main__":

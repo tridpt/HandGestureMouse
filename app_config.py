@@ -19,7 +19,10 @@ class AppConfig:
     smoothening: float = 5.0
     safe_screen_margin: int = 4
     left_click_distance_ratio: float = 0.12
+    left_click_release_ratio: float = 0.16
     right_click_distance_ratio: float = 0.10
+    right_click_release_ratio: float = 0.14
+    click_cooldown_seconds: float = 0.35
     drag_distance_ratio: float = 0.09
     drag_hold_seconds: float = 0.45
     scroll_spread_ratio: float = 0.18
